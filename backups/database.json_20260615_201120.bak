@@ -1,0 +1,14 @@
+{
+    "config": {
+        "PHONG_LAM_VIEC_ID": 1515359289945096315,
+        "PHONG_HOC_TAP_ID": 1515359222576185595,
+        "KENH_THONG_BAO_ID": 1515356648590413855,
+        "KENH_LOG_ID": 0,
+        "KENH_CHAO_MUNG_ID": 0,
+        "ROLE_ADMIN_ID": 0,
+        "ROLE_MOD_ID": 1515359957598339263,
+        "ROLE_MEMBER_ID": 0,
+        "KENH_BXH_ID": 1515356648590413856
+    },
+    "users": {}
+}

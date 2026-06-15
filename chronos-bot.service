@@ -1,0 +1,20 @@
+[Unit]
+Description=Chronos Discipline Discord Bot
+After=network.target
+
+[Service]
+Type=simple
+# Thay đổi thành username thực tế trên VPS của bạn (ví dụ: ubuntu, root, v.v.)
+User=ubuntu
+# Đường dẫn tuyệt đối đến thư mục chứa mã nguồn bot trên VPS
+WorkingDirectory=/home/ubuntu/discord
+# Đường dẫn tuyệt đối đến file python trong môi trường ảo (virtualenv)
+ExecStart=/home/ubuntu/discord/venv/bin/python main.py
+# Tự động chạy lại bot nếu bị sập
+Restart=always
+RestartSec=5
+# Đọc các biến môi trường từ file .env
+EnvironmentFile=/home/ubuntu/discord/.env
+
+[Install]
+WantedBy=multi-user.target
