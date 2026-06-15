@@ -584,6 +584,7 @@ class Economy(commands.Cog):
         await self.bot.wait_until_ready()
         logger.info("Quét kiểm tra thời hạn danh hiệu tự chọn...")
         now = datetime.datetime.now()
+        expired_user_ids = []
         async with get_db_session() as session:
             res = await session.execute(
                 select(User).where(User.custom_title_expiry.isnot(None), User.custom_title_expiry <= now)
@@ -595,21 +596,23 @@ class Economy(commands.Cog):
                     user.active_title = None
                 user.custom_title = None
                 user.custom_title_expiry = None
-                
-                # Gửi thông báo DM cho họ
-                try:
-                    member = None
-                    for guild in self.bot.guilds:
-                        member = guild.get_member(user.user_id)
-                        if member:
-                            break
-                    if member:
-                        await member.send("🎫 **Danh hiệu tự chọn của bạn đã hết hạn 30 ngày.** Hãy mua Gói Thẻ Tùy Biến mới tại Shop để thiết lập lại!")
-                except Exception as e:
-                    logger.warning(f"Không thể gửi thông báo hết hạn danh hiệu cho {user.user_id}: {e}")
+                expired_user_ids.append(user.user_id)
             
             if expired_users:
                 await session.commit()
+                
+        # Gửi thông báo DM ngoài session block
+        for user_id in expired_user_ids:
+            try:
+                member = None
+                for guild in self.bot.guilds:
+                    member = guild.get_member(user_id)
+                    if member:
+                        break
+                if member:
+                    await member.send("🎫 **Danh hiệu tự chọn của bạn đã hết hạn 30 ngày.** Hãy mua Gói Thẻ Tùy Biến mới tại Shop để thiết lập lại!")
+            except Exception as e:
+                logger.warning(f"Không thể gửi thông báo hết hạn danh hiệu cho {user_id}: {e}")
 
     @check_custom_title_expiries.before_loop
     async def before_check_expiries(self):

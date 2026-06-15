@@ -839,21 +839,23 @@ class Leaderboard(commands.Cog):
                 user = user_res.scalar_one_or_none()
                 if user:
                     user.token_balance += tokens_reward
-                    
-                # Gán Role
-                member = guild.get_member(uid)
-                if member:
-                    winner_members.append((member, val_mins / 60.0, tokens_reward))
-                    if role:
-                        try:
-                            await member.add_roles(role, reason=f"Top {idx+1} Focus tuần {week_key}")
-                        except Exception as e:
-                            logger.error(f"Lỗi khi gán role cho {member.display_name}: {e}")
-                else:
-                    disp_name = await self.get_user_display_name(self.bot, guild, uid)
-                    winner_members.append((disp_name, val_mins / 60.0, tokens_reward))
-                    
             await session.commit()
+            
+        # Tách biệt Discord API calls ra ngoài database session block
+        for idx, row in enumerate(winners):
+            uid, lvl, streak, val_mins = row
+            tokens_reward = rewards[idx]
+            member = guild.get_member(uid)
+            if member:
+                winner_members.append((member, val_mins / 60.0, tokens_reward))
+                if role:
+                    try:
+                        await member.add_roles(role, reason=f"Top {idx+1} Focus tuần {week_key}")
+                    except Exception as e:
+                        logger.error(f"Lỗi khi gán role cho {member.display_name}: {e}")
+            else:
+                disp_name = await self.get_user_display_name(self.bot, guild, uid)
+                winner_members.append((disp_name, val_mins / 60.0, tokens_reward))
             
         set_last_rewarded_week(week_key)
         
@@ -944,19 +946,22 @@ class Leaderboard(commands.Cog):
                     user = user_res.scalar_one_or_none()
                     if user:
                         user.token_balance += tokens_reward
-                        
-                    member = ctx.guild.get_member(uid)
-                    if member:
-                        winner_members.append((member, val_mins / 60.0, tokens_reward))
-                        try:
-                            await member.add_roles(role, reason=f"Top {idx+1} Focus Tuần (Forced)")
-                        except Exception as e:
-                            logger.error(f"Không thể gán role cho {member.display_name}: {e}")
-                    else:
-                        disp_name = await self.get_user_display_name(self.bot, ctx.guild, uid)
-                        winner_members.append((disp_name, val_mins / 60.0, tokens_reward))
-                        
                 await session.commit()
+                
+            # Tách biệt Discord API calls ra ngoài database session block
+            for idx, row in enumerate(winners):
+                uid, lvl, streak, val_mins = row
+                tokens_reward = rewards[idx]
+                member = ctx.guild.get_member(uid)
+                if member:
+                    winner_members.append((member, val_mins / 60.0, tokens_reward))
+                    try:
+                        await member.add_roles(role, reason=f"Top {idx+1} Focus Tuần (Forced)")
+                    except Exception as e:
+                        logger.error(f"Không thể gán role cho {member.display_name}: {e}")
+                else:
+                    disp_name = await self.get_user_display_name(self.bot, ctx.guild, uid)
+                    winner_members.append((disp_name, val_mins / 60.0, tokens_reward))
                 
             ann_channel = ctx.guild.get_channel(config.KENH_THONG_BAO_ID)
             if not ann_channel:

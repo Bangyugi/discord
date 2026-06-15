@@ -140,6 +140,8 @@ class Tracker(commands.Cog):
         logger.info("Đang kiểm tra và khôi phục các phiên Focus chưa hoàn thành trước đó...")
         now = datetime.datetime.now()
         
+        pending_data = []
+        
         async with get_db_session() as session:
             # Tìm các session có trạng thái 'pending'
             res = await session.execute(
@@ -157,57 +159,82 @@ class Tracker(commands.Cog):
                     fs.status = "failed"
                     continue
                 
-                user_id = fs.user_id
-                
-                # Tìm xem người dùng đang ở kênh thoại nào
-                user_vc_id = None
-                for guild in self.bot.guilds:
-                    member = guild.get_member(user_id)
-                    if member and member.voice and member.voice.channel:
-                        user_vc_id = member.voice.channel.id
-                        break
-                
-                # Nếu người dùng vẫn ở trong phòng voice
-                if user_vc_id:
-                    # Tính thời lượng còn lại
-                    elapsed_minutes = (now - fs.start_time).total_seconds() / 60
-                    if elapsed_minutes >= task.duration_minutes:
-                        # Nếu thời gian trôi qua đã đủ trong lúc bot offline, hoàn thành xuất sắc luôn!
-                        await self.complete_focus_session(user_id, fs.session_id, task, now)
-                    else:
-                        # Nếu chưa đủ thời gian, tiếp tục theo dõi
-                        self.active_sessions[user_id] = {
-                            "task_id": task.task_id,
-                            "session_id": fs.session_id,
-                            "start_time": fs.start_time,
-                            "duration": task.duration_minutes,
-                            "task_title": task.title,
-                            "voice_channel_id": user_vc_id,
-                            "disconnect_time": None,
-                            "task_type": task.task_type,
-                            "original_duration": task.duration_minutes,
-                            "is_extended": False,
-                            "warning_sent": False
-                        }
-                        logger.info(f"Đã khôi phục theo dõi Focus cho User ID {user_id} (Task: {task.title})")
-                else:
-                    # Nếu user đã thoát voice trong lúc bot offline, đánh dấu thất bại
-                    fs.status = "failed"
-                    # Phạt người dùng vì không duy trì kỷ luật
-                    punishment_cog = self.bot.get_cog("Punishment")
-                    if punishment_cog:
-                        guild_id = self.bot.guilds[0].id # Lấy guild đầu tiên làm mặc định để phạt
-                        for g in self.bot.guilds:
-                            if g.get_member(user_id):
-                                guild_id = g.id
-                                break
-                        await punishment_cog.apply_punishment(
-                            user_id, 
-                            guild_id, 
-                            f"Không có mặt trong phòng voice khi hệ thống khởi động lại (đứt quãng phiên Focus '{task.title}')"
-                        )
+                pending_data.append({
+                    "session_id": fs.session_id,
+                    "user_id": fs.user_id,
+                    "start_time": fs.start_time,
+                    "task_id": task.task_id,
+                    "task_title": task.title,
+                    "task_duration": task.duration_minutes,
+                    "task_type": task.task_type
+                })
             
             await session.commit()
+            
+        # Xử lý sau khi Session đã đóng
+        for item in pending_data:
+            user_id = item["user_id"]
+            session_id = item["session_id"]
+            start_time = item["start_time"]
+            task_id = item["task_id"]
+            task_title = item["task_title"]
+            task_duration = item["task_duration"]
+            task_type = item["task_type"]
+            
+            # Tìm xem người dùng đang ở kênh thoại nào
+            user_vc_id = None
+            for guild in self.bot.guilds:
+                member = guild.get_member(user_id)
+                if member and member.voice and member.voice.channel:
+                    user_vc_id = member.voice.channel.id
+                    break
+            
+            # Nếu người dùng vẫn ở trong phòng voice
+            if user_vc_id:
+                # Tính thời lượng còn lại
+                elapsed_minutes = (now - start_time).total_seconds() / 60
+                if elapsed_minutes >= task_duration:
+                    # Nếu thời gian trôi qua đã đủ trong lúc bot offline, hoàn thành xuất sắc luôn!
+                    await self.complete_focus_session(user_id, session_id, {"task_title": task_title, "duration": task_duration}, now)
+                else:
+                    # Nếu chưa đủ thời gian, tiếp tục theo dõi
+                    self.active_sessions[user_id] = {
+                        "task_id": task_id,
+                        "session_id": session_id,
+                        "start_time": start_time,
+                        "duration": task_duration,
+                        "task_title": task_title,
+                        "voice_channel_id": user_vc_id,
+                        "disconnect_time": None,
+                        "task_type": task_type,
+                        "original_duration": task_duration,
+                        "is_extended": False,
+                        "warning_sent": False
+                    }
+                    logger.info(f"Đã khôi phục theo dõi Focus cho User ID {user_id} (Task: {task_title})")
+            else:
+                # Nếu user đã thoát voice trong lúc bot offline, đánh dấu thất bại
+                async with get_db_session() as session:
+                    await session.execute(
+                        update(FocusSession)
+                        .where(FocusSession.session_id == session_id)
+                        .values(status="failed")
+                    )
+                    await session.commit()
+                    
+                # Phạt người dùng vì không duy trì kỷ luật
+                punishment_cog = self.bot.get_cog("Punishment")
+                if punishment_cog:
+                    guild_id = self.bot.guilds[0].id if self.bot.guilds else 0
+                    for g in self.bot.guilds:
+                        if g.get_member(user_id):
+                            guild_id = g.id
+                            break
+                    await punishment_cog.apply_punishment(
+                        user_id, 
+                        guild_id, 
+                        f"Không có mặt trong phòng voice khi hệ thống khởi động lại (đứt quãng phiên Focus '{task_title}')"
+                    )
 
     async def scan_tasks_job(self):
         """
@@ -215,29 +242,48 @@ class Tracker(commands.Cog):
         """
         logger.info("Đang thực hiện quét Task biểu hằng ngày...")
         now = datetime.datetime.now()
-        current_time = now.time()
         current_minutes = now.hour * 60 + now.minute
-        today_weekday = str(now.weekday())
 
+        all_tasks_data = []
         async with get_db_session() as session:
             # 1. QUÉT KHỞI TẠO VÀ NHẮC NHỞ
             res = await session.execute(select(Task))
             all_tasks = res.scalars().all()
-
             for task in all_tasks:
-                # Chỉ chạy đúng ngày bắt đầu của task (không lặp lại hằng ngày)
-                if task.start_date and now.date() != task.start_date:
-                    continue
+                all_tasks_data.append({
+                    "user_id": task.user_id,
+                    "title": task.title,
+                    "start_date": task.start_date,
+                    "start_time": task.start_time,
+                    "duration_minutes": task.duration_minutes,
+                    "task_type": task.task_type,
+                    "task_id": task.task_id
+                })
 
-                task_minutes = task.start_time.hour * 60 + task.start_time.minute
-                
-                # A. Gửi nhắc nhở trước 5 phút (Hoặc wrap quanh ngày)
-                if (task_minutes - current_minutes) % 1440 == 5:
-                    await self.send_dm_reminder(task.user_id, task.title)
+        class DummyTask:
+            def __init__(self, data):
+                self.user_id = data["user_id"]
+                self.title = data["title"]
+                self.start_date = data["start_date"]
+                self.start_time = data["start_time"]
+                self.duration_minutes = data["duration_minutes"]
+                self.task_type = data["task_type"]
+                self.task_id = data["task_id"]
 
-                # B. Đúng giờ G bắt đầu Focus
-                elif task_minutes == current_minutes:
-                    await self.handle_task_start_time(task)
+        for t_data in all_tasks_data:
+            # Chỉ chạy đúng ngày bắt đầu của task (không lặp lại hằng ngày)
+            if t_data["start_date"] and now.date() != t_data["start_date"]:
+                continue
+
+            task_minutes = t_data["start_time"].hour * 60 + t_data["start_time"].minute
+            
+            # A. Gửi nhắc nhở trước 5 phút (Hoặc wrap quanh ngày)
+            if (task_minutes - current_minutes) % 1440 == 5:
+                await self.send_dm_reminder(t_data["user_id"], t_data["title"])
+
+            # B. Đúng giờ G bắt đầu Focus
+            elif task_minutes == current_minutes:
+                await self.handle_task_start_time(DummyTask(t_data))
 
         # 2. KIỂM TRA HẾT HẠN GRACE PERIOD (VẮNG MẶT QUÁ 5 PHÚT)
         await self.check_grace_period_expiry(now)
@@ -478,7 +524,7 @@ class Tracker(commands.Cog):
                     # 2. Kích hoạt hình phạt từ Module 4
                     punishment_cog = self.bot.get_cog("Punishment")
                     if punishment_cog:
-                        guild_id = self.bot.guilds[0].id
+                        guild_id = self.bot.guilds[0].id if self.bot.guilds else 0
                         for guild in self.bot.guilds:
                             if guild.get_member(user_id):
                                 guild_id = guild.id
@@ -597,7 +643,7 @@ class Tracker(commands.Cog):
                     # 2. Phạt người dùng
                     punishment_cog = self.bot.get_cog("Punishment")
                     if punishment_cog:
-                        guild_id = self.bot.guilds[0].id
+                        guild_id = self.bot.guilds[0].id if self.bot.guilds else 0
                         for guild in self.bot.guilds:
                             if guild.get_member(user_id):
                                 guild_id = guild.id
@@ -747,6 +793,10 @@ class Tracker(commands.Cog):
 
         # Kiểm tra nếu người dùng vào phòng voice bị giới hạn
         if after.channel is not None:
+            # Bỏ qua nếu người dùng vào phòng trigger để tạo phòng Focus động
+            if after.channel.id == config.FOCUS_TRIGGER_CHANNEL_ID:
+                return
+                
             channel_name = after.channel.name.lower()
             required_type = None
             if "học tập" in channel_name or "học" in channel_name or after.channel.id == config.PHONG_HOC_TAP_ID:

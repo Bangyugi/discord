@@ -10,24 +10,7 @@ from database.models import User, FocusSession, Task, ViolationLog
 
 logger = logging.getLogger("ChronosBot.Profile")
 
-class Profile(commands.Cog):
-    def __init__(self, bot: commands.Bot):
-        self.bot = bot
-        # Đăng ký User Context Menu "Xem Hồ Sơ"
-        # Xuất hiện khi chuột phải vào member -> Chọn Apps -> Xem Hồ Sơ
-        self.ctx_menu = app_commands.ContextMenu(
-            name="Xem Hồ Sơ",
-            callback=self.view_profile_callback
-        )
-        self.bot.tree.add_command(self.ctx_menu)
 
-    def cog_unload(self):
-        # Gỡ bỏ Context Menu khi Cog bị unload để tránh trùng lặp lệnh
-        self.bot.tree.remove_command(self.ctx_menu.name, type=self.ctx_menu.type)
-
-    @commands.Cog.listener()
-    async def on_ready(self):
-        logger.info("Profile Cog đã sẵn sàng.")
 
 async def get_profile_embed(member: discord.Member) -> discord.Embed:
     """
