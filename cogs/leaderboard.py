@@ -6,7 +6,7 @@ import os
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
-from sqlalchemy import select, func
+from sqlalchemy import select, func, update
 from database.db_session import get_db_session
 from database.models import User, FocusSession
 import config
@@ -437,12 +437,10 @@ class Leaderboard(commands.Cog):
             stmt = (
                 select(
                     User.user_id,
-                    func.coalesce(func.sum(FocusSession.actual_duration), 0).label("total_mins")
+                    User.total_focus_minutes
                 )
-                .outerjoin(FocusSession, (User.user_id == FocusSession.user_id) & (FocusSession.status == "completed"))
-                .group_by(User.user_id)
                 .order_by(
-                    func.coalesce(func.sum(FocusSession.actual_duration), 0).desc(),
+                    User.total_focus_minutes.desc(),
                     User.level.desc(),
                     User.user_id.asc()
                 )
@@ -472,12 +470,10 @@ class Leaderboard(commands.Cog):
                         User.user_id,
                         User.level,
                         User.current_streak,
-                        func.coalesce(func.sum(FocusSession.actual_duration), 0).label("val")
+                        User.total_focus_minutes.label("val")
                     )
-                    .outerjoin(FocusSession, (User.user_id == FocusSession.user_id) & (FocusSession.status == "completed"))
-                    .group_by(User.user_id)
                     .order_by(
-                        func.coalesce(func.sum(FocusSession.actual_duration), 0).desc(),
+                        User.total_focus_minutes.desc(),
                         User.level.desc(),
                         User.user_id.asc()
                     )
@@ -488,13 +484,11 @@ class Leaderboard(commands.Cog):
                         User.user_id,
                         User.level,
                         User.current_streak,
-                        func.coalesce(func.sum(FocusSession.actual_duration), 0).label("val")
+                        User.total_focus_minutes.label("val")
                     )
-                    .outerjoin(FocusSession, (User.user_id == FocusSession.user_id) & (FocusSession.status == "completed"))
-                    .group_by(User.user_id)
                     .order_by(
                         User.current_streak.desc(),
-                        func.coalesce(func.sum(FocusSession.actual_duration), 0).desc(),
+                        User.total_focus_minutes.desc(),
                         User.level.desc(),
                         User.user_id.asc()
                     )
@@ -505,18 +499,10 @@ class Leaderboard(commands.Cog):
                         User.user_id,
                         User.level,
                         User.current_streak,
-                        func.coalesce(func.sum(FocusSession.actual_duration), 0).label("val")
+                        User.week_focus_minutes.label("val")
                     )
-                    .outerjoin(
-                        FocusSession,
-                        (User.user_id == FocusSession.user_id) & 
-                        (FocusSession.status == "completed") & 
-                        (FocusSession.start_time >= start_of_week) &
-                        (FocusSession.start_time < end_of_week)
-                    )
-                    .group_by(User.user_id)
                     .order_by(
-                        func.coalesce(func.sum(FocusSession.actual_duration), 0).desc(),
+                        User.week_focus_minutes.desc(),
                         User.level.desc(),
                         User.user_id.asc()
                     )
@@ -801,6 +787,11 @@ class Leaderboard(commands.Cog):
         if not winners:
             logger.info("Không có thành viên nào tập trung trong tuần vừa qua. Bỏ qua phát quà.")
             set_last_rewarded_week(week_key)
+            # Reset week_focus_minutes ngay cả khi không có ai thắng
+            async with get_db_session() as session:
+                await session.execute(update(User).values(week_focus_minutes=0))
+                await session.commit()
+            logger.info("Đã reset week_focus_minutes của tất cả thành viên cho tuần mới.")
             return
             
         # Tìm danh hiệu role 'Vua Kỷ Luật Tuần'
@@ -858,6 +849,12 @@ class Leaderboard(commands.Cog):
                 winner_members.append((disp_name, val_mins / 60.0, tokens_reward))
             
         set_last_rewarded_week(week_key)
+        
+        # Reset week_focus_minutes cho tất cả user
+        async with get_db_session() as session:
+            await session.execute(update(User).values(week_focus_minutes=0))
+            await session.commit()
+        logger.info("Đã reset week_focus_minutes của tất cả thành viên cho tuần mới.")
         
         # 3. Gửi thông báo vinh danh lên kênh thông báo
         ann_channel = guild.get_channel(config.KENH_THONG_BAO_ID)

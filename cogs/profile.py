@@ -24,15 +24,7 @@ async def get_profile_embed(member: discord.Member) -> discord.Embed:
         user_res = await session.execute(select(User).filter_by(user_id=user_id))
         user = user_res.scalar_one_or_none()
         
-        # 2. Truy vấn danh sách FocusSession hoàn thành kèm Task tương ứng
-        fs_res = await session.execute(
-            select(FocusSession, Task)
-            .outerjoin(Task, FocusSession.task_id == Task.task_id)
-            .where(FocusSession.user_id == user_id, FocusSession.status == "completed")
-        )
-        completed_sessions = fs_res.all()
-        
-        # 3. Truy vấn tổng số lần vi phạm kỷ luật
+        # 2. Truy vấn tổng số lần vi phạm kỷ luật
         violation_res = await session.execute(
             select(ViolationLog).where(ViolationLog.user_id == user_id)
         )
@@ -61,37 +53,45 @@ async def get_profile_embed(member: discord.Member) -> discord.Embed:
     progress = int(ratio * 10)
     progress_bar = "🟩" * progress + "⬜" * (10 - progress)
 
-    # Tính toán thời gian Focus tích lũy & phân loại mục tiêu
-    total_focus_minutes = 0
-    code_minutes = 0
-    study_minutes = 0
-    work_minutes = 0
-    
-    # Danh mục từ khóa phân loại
-    code_keywords = ["code", "python", "dev", "java", "c++", "html", "programming", "lập trình", "git", "coding", "web", "rust"]
-    study_keywords = ["english", "ielts", "anh", "tieng", "japan", "korean", "học", "study", "read", "sách", "book", "toán", "math", "class"]
+    # Lấy thống kê tích lũy trực tiếp từ User
+    total_focus_minutes = user.total_focus_minutes if user else 0
+    total_completed_sessions = user.total_focus_sessions if user else 0
 
-    for fs, task in completed_sessions:
-        duration = fs.actual_duration
-        total_focus_minutes += duration
-        
-        if task:
-            title_lower = task.title.lower()
-            # Phân loại danh mục
-            if any(keyword in title_lower for keyword in code_keywords):
-                code_minutes += duration
-            elif any(keyword in title_lower for keyword in study_keywords):
-                study_minutes += duration
-            else:
-                work_minutes += duration
-        else:
-            work_minutes += duration
+    category_minutes = {
+        "làm việc": user.focus_minutes_work if user else 0,
+        "học tập": user.focus_minutes_study if user else 0,
+        "giải trí": user.focus_minutes_entertainment if user else 0,
+        "khác": user.focus_minutes_other if user else 0
+    }
 
-    # Đổi phút sang Giờ & Phút
+    # Đổi phút sang Giờ & Phút cho tổng thời gian
     total_hours, total_mins = total_focus_minutes // 60, total_focus_minutes % 60
-    code_hours, code_mins = code_minutes // 60, code_minutes % 60
-    study_hours, study_mins = study_minutes // 60, study_minutes % 60
-    work_hours, work_mins = work_minutes // 60, work_minutes % 60
+
+    # Các danh mục mặc định luôn hiển thị (dù là 0g 0p)
+    categories_info = {
+        "làm việc": ("💼", "Làm việc"),
+        "học tập": ("📚", "Học tập"),
+        "giải trí": ("🎮", "Giải trí")
+    }
+
+    # Xây dựng chuỗi hiển thị phân bổ nội dung
+    distribution_lines = []
+    
+    # 1. Các danh mục mặc định
+    for cat_key, (emoji, label) in categories_info.items():
+        mins = category_minutes.get(cat_key, 0)
+        hours, remaining_mins = mins // 60, mins % 60
+        distribution_lines.append(f"• {emoji} {label}: **`{hours}g {remaining_mins}p`**")
+        
+    # 2. Các danh mục khác hiển thị nếu có thời gian > 0
+    for cat_key, mins in category_minutes.items():
+        if cat_key not in categories_info and mins > 0:
+            emoji = "🧩" if cat_key == "khác" else "🎯"
+            label = "Khác" if cat_key == "khác" else cat_key.capitalize()
+            hours, remaining_mins = mins // 60, mins % 60
+            distribution_lines.append(f"• {emoji} {label}: **`{hours}g {remaining_mins}p`**")
+            
+    distribution_str = "\n".join(distribution_lines)
 
     # --- DỰNG EMBED PROFILE ---
     active_title = user.active_title if (user and user.active_title) else "Chưa trang bị"
@@ -152,18 +152,14 @@ async def get_profile_embed(member: discord.Member) -> discord.Embed:
     # Trường 4: Thống kê Focus
     embed.add_field(
         name="⏱️ Tổng Thời Gian Focus",
-        value=f"• **`{total_hours} giờ {total_mins} phút`**\n• Đã hoàn thành: **`{len(completed_sessions)} phiên`**",
+        value=f"• **`{total_hours} giờ {total_mins} phút`**\n• Đã hoàn thành: **`{total_completed_sessions} phiên`**",
         inline=False
     )
 
     # Trường 5: Phân bổ nội dung học/làm việc
     embed.add_field(
         name="📚 Phân Bổ Nội Dung Tập Trung",
-        value=(
-            f"• 💻 Lập trình (Coding): **`{code_hours}g {code_mins}p`**\n"
-            f"• 📖 Học tập & Ngoại ngữ: **`{study_hours}g {study_mins}p`**\n"
-            f"• 💼 Công việc & Khác: **`{work_hours}g {work_mins}p`**"
-        ),
+        value=distribution_str,
         inline=False
     )
 

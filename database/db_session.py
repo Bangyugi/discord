@@ -78,6 +78,96 @@ async def run_migrations(conn):
         logger.info("Thêm cột shame_expiry vào bảng users...")
         await conn.execute(text("ALTER TABLE users ADD COLUMN shame_expiry DATETIME"))
         
+    should_backfill = False
+    if "total_focus_minutes" not in columns:
+        logger.info("Thêm cột total_focus_minutes vào bảng users...")
+        await conn.execute(text("ALTER TABLE users ADD COLUMN total_focus_minutes INTEGER DEFAULT 0 NOT NULL"))
+        should_backfill = True
+    if "total_focus_sessions" not in columns:
+        logger.info("Thêm cột total_focus_sessions vào bảng users...")
+        await conn.execute(text("ALTER TABLE users ADD COLUMN total_focus_sessions INTEGER DEFAULT 0 NOT NULL"))
+        should_backfill = True
+    if "week_focus_minutes" not in columns:
+        logger.info("Thêm cột week_focus_minutes vào bảng users...")
+        await conn.execute(text("ALTER TABLE users ADD COLUMN week_focus_minutes INTEGER DEFAULT 0 NOT NULL"))
+        should_backfill = True
+    if "focus_minutes_work" not in columns:
+        logger.info("Thêm cột focus_minutes_work vào bảng users...")
+        await conn.execute(text("ALTER TABLE users ADD COLUMN focus_minutes_work INTEGER DEFAULT 0 NOT NULL"))
+        should_backfill = True
+    if "focus_minutes_study" not in columns:
+        logger.info("Thêm cột focus_minutes_study vào bảng users...")
+        await conn.execute(text("ALTER TABLE users ADD COLUMN focus_minutes_study INTEGER DEFAULT 0 NOT NULL"))
+        should_backfill = True
+    if "focus_minutes_entertainment" not in columns:
+        logger.info("Thêm cột focus_minutes_entertainment vào bảng users...")
+        await conn.execute(text("ALTER TABLE users ADD COLUMN focus_minutes_entertainment INTEGER DEFAULT 0 NOT NULL"))
+        should_backfill = True
+    if "focus_minutes_other" not in columns:
+        logger.info("Thêm cột focus_minutes_other vào bảng users...")
+        await conn.execute(text("ALTER TABLE users ADD COLUMN focus_minutes_other INTEGER DEFAULT 0 NOT NULL"))
+        should_backfill = True
+
+    if should_backfill:
+        logger.info("Tiến hành backfill dữ liệu lịch sử tập trung từ các phiên cũ vào các cột mới...")
+        try:
+            # Lấy toàn bộ các FocusSession có status = 'completed' và task tương ứng (nếu có)
+            sessions_query = await conn.execute(text("""
+                SELECT fs.user_id, fs.actual_duration, t.task_type
+                FROM focus_sessions fs
+                LEFT JOIN tasks t ON fs.task_id = t.task_id
+                WHERE fs.status = 'completed'
+            """))
+            rows = sessions_query.fetchall()
+            
+            user_stats = {}
+            for uid, duration, task_type in rows:
+                if uid not in user_stats:
+                    user_stats[uid] = {
+                        "total_mins": 0,
+                        "total_sessions": 0,
+                        "work_mins": 0,
+                        "study_mins": 0,
+                        "ent_mins": 0,
+                        "other_mins": 0
+                    }
+                user_stats[uid]["total_mins"] += duration
+                user_stats[uid]["total_sessions"] += 1
+                
+                t_type = task_type.strip().lower() if task_type else "khác"
+                if t_type == "làm việc":
+                    user_stats[uid]["work_mins"] += duration
+                elif t_type == "học tập":
+                    user_stats[uid]["study_mins"] += duration
+                elif t_type == "giải trí":
+                    user_stats[uid]["ent_mins"] += duration
+                else:
+                    user_stats[uid]["other_mins"] += duration
+            
+            for uid, stats in user_stats.items():
+                await conn.execute(text("""
+                    UPDATE users
+                    SET total_focus_minutes = :total_mins,
+                        total_focus_sessions = :total_sessions,
+                        week_focus_minutes = :total_mins,
+                        focus_minutes_work = :work_mins,
+                        focus_minutes_study = :study_mins,
+                        focus_minutes_entertainment = :ent_mins,
+                        focus_minutes_other = :other_mins
+                    WHERE user_id = :uid
+                """), {
+                    "total_mins": stats["total_mins"],
+                    "total_sessions": stats["total_sessions"],
+                    "work_mins": stats["work_mins"],
+                    "study_mins": stats["study_mins"],
+                    "ent_mins": stats["ent_mins"],
+                    "other_mins": stats["other_mins"],
+                    "uid": uid
+                })
+            logger.info(f"Đã backfill dữ liệu thành công cho {len(user_stats)} người dùng!")
+        except Exception as e:
+            logger.error(f"Lỗi xảy ra trong quá trình backfill di trú: {e}")
+
     # Kiểm tra cột mới trong bảng tasks
     result_task = await conn.execute(text("PRAGMA table_info(tasks)"))
     task_columns = [row[1] for row in result_task.fetchall()]

@@ -30,6 +30,17 @@ class User(Base):
     # Ngày tập trung cuối cùng (Dùng để tính streak chính xác không phụ thuộc múi giờ máy chủ)
     last_focus_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     
+    # Thống kê tích lũy thời gian Focus
+    total_focus_minutes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    total_focus_sessions: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    week_focus_minutes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    
+    # Phân bổ nội dung tập trung tích lũy
+    focus_minutes_work: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    focus_minutes_study: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    focus_minutes_entertainment: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    focus_minutes_other: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    
     # Các trường mở rộng cho hệ thống Economy & Grand Mall
     active_title: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     custom_title: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)

@@ -4,7 +4,7 @@ import math
 import discord
 from discord.ext import commands
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from sqlalchemy import select, update
+from sqlalchemy import select, update, delete
 from database.db_session import get_db_session
 from database.models import User, Task, FocusSession, Inventory
 import config
@@ -128,7 +128,43 @@ class Tracker(commands.Cog):
             self.scheduler.start()
             # Đăng ký Job kiểm tra mỗi phút chạy tại giây thứ 0
             self.scheduler.add_job(self.scan_tasks_job, "cron", second=0)
-            logger.info("APScheduler đã được bắt đầu và đăng ký tác vụ quét mỗi phút.")
+            self.scheduler.add_job(
+                self.remind_goal_registration_job,
+                "cron",
+                hour=19,
+                minute=0,
+                second=0,
+                id="tracker_remind_goal_registration",
+                replace_existing=True
+            )
+            self.scheduler.add_job(
+                self.check_goal_violation_and_reset_job,
+                "cron",
+                hour=3,
+                minute=0,
+                second=0,
+                id="tracker_check_goal_violation_and_reset",
+                replace_existing=True
+            )
+            self.scheduler.add_job(
+                self.morning_greeting_job,
+                "cron",
+                hour=8,
+                minute=0,
+                second=0,
+                id="tracker_morning_greeting",
+                replace_existing=True
+            )
+            self.scheduler.add_job(
+                self.daily_summary_job,
+                "cron",
+                hour=0,
+                minute=0,
+                second=0,
+                id="tracker_daily_summary",
+                replace_existing=True
+            )
+            logger.info("APScheduler đã được bắt đầu và đăng ký các tác vụ quét mỗi phút, nhắc nhở (19:00), phạt/reset (03:00), chào buổi sáng (08:00) và tổng kết ngày (00:00).")
             
         # Khôi phục các active session cũ từ DB (nếu bot bị restart bất thình lình)
         await self.recover_active_sessions()
@@ -690,6 +726,35 @@ class Tracker(commands.Cog):
             user_res = await session.execute(select(User).filter_by(user_id=user_id))
             user = user_res.scalar_one()
 
+            # Lấy task_type từ session_id nếu không được truyền vào qua session_info
+            if isinstance(session_info, dict):
+                task_type = session_info.get("task_type")
+            else:
+                task_type = getattr(session_info, "task_type", None)
+
+            if not task_type:
+                fs_db_res = await session.execute(
+                    select(Task.task_type)
+                    .join(FocusSession, FocusSession.task_id == Task.task_id)
+                    .where(FocusSession.session_id == session_id)
+                )
+                task_type = fs_db_res.scalar_one_or_none()
+
+            # Cập nhật thống kê tích lũy thời gian Focus cho User
+            user.total_focus_minutes += duration
+            user.total_focus_sessions += 1
+            user.week_focus_minutes += duration
+            
+            t_type_clean = task_type.strip().lower() if task_type else "khác"
+            if t_type_clean == "làm việc":
+                user.focus_minutes_work += duration
+            elif t_type_clean == "học tập":
+                user.focus_minutes_study += duration
+            elif t_type_clean == "giải trí":
+                user.focus_minutes_entertainment += duration
+            else:
+                user.focus_minutes_other += duration
+
             # Kiểm tra Thẻ X2 Tốc Độ còn hạn không
             if user.x2_expiry and now < user.x2_expiry:
                 earned_xp *= 2
@@ -928,6 +993,278 @@ class Tracker(commands.Cog):
                         await member.send("✅ **Kết nối thành công!** Phiên làm việc Focus của bạn tiếp tục được duy trì.")
                     except discord.Forbidden:
                         pass
+
+    async def remind_goal_registration_job(self):
+        """
+        Job chạy hằng ngày lúc 19h để nhắc nhở người dùng chưa đăng ký mục tiêu trong ngày.
+        """
+        logger.info("Bắt đầu Job nhắc nhở đăng ký mục tiêu (19:00)...")
+        today = datetime.date.today()
+        
+        async with get_db_session() as session:
+            # Lấy tất cả người dùng trong DB
+            res = await session.execute(select(User))
+            users = res.scalars().all()
+            
+            for user in users:
+                # Kiểm tra mục tiêu của hôm nay
+                task_res = await session.execute(
+                    select(Task).where(Task.user_id == user.user_id, Task.start_date == today)
+                )
+                tasks = task_res.scalars().all()
+                
+                if not tasks:
+                    # Chưa đăng ký -> Tìm guild member và gửi DM
+                    member = None
+                    for guild in self.bot.guilds:
+                        member = guild.get_member(user.user_id)
+                        if member:
+                            break
+                    if member:
+                        try:
+                            embed = discord.Embed(
+                                title="🔔 NHẮC NHỞ ĐĂNG KÝ MỤC TIÊU 🔔",
+                                description=(
+                                    f"Chào {member.mention},\n\n"
+                                    f"Hệ thống ghi nhận bạn **chưa đăng ký mục tiêu nào** cho ngày hôm nay.\n"
+                                    f"Vui lòng đăng ký ít nhất **1 mục tiêu** bằng nút **Đăng ký mục tiêu 🎯** ở kênh `control-panel` trước **03:00 (sáng hôm sau)** để tránh bị phạt vi phạm kỷ luật!"
+                                ),
+                                color=discord.Color.gold()
+                            )
+                            await member.send(embed=embed)
+                            logger.info(f"Đã gửi nhắc nhở đăng ký mục tiêu thành công cho {member.name}.")
+                        except discord.Forbidden:
+                            logger.warning(f"Không thể gửi DM nhắc nhở cho {member.name} (chặn DM).")
+                        except Exception as e:
+                            logger.error(f"Lỗi gửi DM nhắc nhở cho {user.user_id}: {e}")
+
+    async def check_goal_violation_and_reset_job(self):
+        """
+        Job chạy hằng ngày lúc 03:00 để phạt các thành viên không đăng ký mục tiêu hôm qua
+        và dọn dẹp (reset) các mục tiêu cũ.
+        """
+        logger.info("Bắt đầu Job phạt vi phạm mục tiêu và reset (03:00)...")
+        now = datetime.datetime.now()
+        yesterday = (now - datetime.timedelta(days=1)).date()
+        
+        async with get_db_session() as session:
+            # 1. Quét phạt vi phạm
+            res = await session.execute(select(User))
+            users = res.scalars().all()
+            
+            punishment_cog = self.bot.get_cog("Punishment")
+            
+            for user in users:
+                # Kiểm tra mục tiêu của hôm qua
+                task_res = await session.execute(
+                    select(Task).where(Task.user_id == user.user_id, Task.start_date == yesterday)
+                )
+                tasks = task_res.scalars().all()
+                
+                if not tasks:
+                    logger.warning(f"User ID {user.user_id} không đăng ký mục tiêu trong ngày {yesterday}.")
+                    if punishment_cog:
+                        guild_id = self.bot.guilds[0].id if self.bot.guilds else 0
+                        for guild in self.bot.guilds:
+                            if guild.get_member(user.user_id):
+                                guild_id = guild.id
+                                break
+                        await punishment_cog.apply_punishment(
+                            user.user_id,
+                            guild_id,
+                            f"Không đăng ký ít nhất 1 mục tiêu tập trung trong ngày {yesterday.strftime('%d/%m/%Y')}."
+                        )
+            
+            # 2. Reset: Dọn dẹp các task từ ngày hôm qua trở về trước
+            # (Giữ lại các task đang nằm trong ca Focus hoạt động qua đêm)
+            pending_fs_res = await session.execute(
+                select(FocusSession.task_id).where(FocusSession.status == "pending")
+            )
+            pending_task_ids = [r[0] for r in pending_fs_res.all() if r[0] is not None]
+            
+            stmt = delete(Task).where(Task.start_date <= yesterday)
+            if pending_task_ids:
+                stmt = stmt.where(Task.task_id.not_in(pending_task_ids))
+                
+            await session.execute(stmt)
+
+            # 3. Dọn dẹp các FocusSession cũ để tránh đầy dung lượng DB (giữ lại hôm nay để làm báo cáo lúc 00:00)
+            stmt_fs = delete(FocusSession).where(
+                FocusSession.status.in_(["completed", "failed"]),
+                FocusSession.start_time < datetime.datetime.combine(now.date(), datetime.time.min)
+            )
+            await session.execute(stmt_fs)
+
+            await session.commit()
+            logger.info("Đã hoàn thành Job reset mục tiêu và dọn dẹp phiên Focus cũ hằng ngày.")
+
+    @commands.hybrid_command(
+        name="test_remind_registration", 
+        description="[Admin Only] Kích hoạt thủ công kiểm tra và nhắc nhở đăng ký mục tiêu hôm nay"
+    )
+    @commands.has_permissions(administrator=True)
+    async def test_remind_registration(self, ctx: commands.Context):
+        await ctx.defer(ephemeral=True)
+        try:
+            await self.remind_goal_registration_job()
+            await ctx.send("✅ Đã chạy quét và nhắc nhở đăng ký mục tiêu thành công!", ephemeral=True)
+        except Exception as e:
+            logger.error(f"Lỗi khi chạy quét nhắc nhở thủ công: {e}")
+            await ctx.send(f"❌ Gặp lỗi: {e}", ephemeral=True)
+
+    @commands.hybrid_command(
+        name="test_check_violation", 
+        description="[Admin Only] Kích hoạt thủ công phạt vi phạm đăng ký mục tiêu hôm qua và reset"
+    )
+    @commands.has_permissions(administrator=True)
+    async def test_check_violation(self, ctx: commands.Context):
+        await ctx.defer(ephemeral=True)
+        try:
+            await self.check_goal_violation_and_reset_job()
+            await ctx.send("✅ Đã chạy quét phạt vi phạm và reset mục tiêu thành công!", ephemeral=True)
+        except Exception as e:
+            logger.error(f"Lỗi khi chạy phạt vi phạm thủ công: {e}")
+            await ctx.send(f"❌ Gặp lỗi: {e}", ephemeral=True)
+
+    async def morning_greeting_job(self):
+        """
+        Job chạy hằng ngày lúc 08:00 sáng để gửi tin nhắn chúc ngày mới tốt lành đến các thành viên.
+        """
+        logger.info("Bắt đầu Job chào buổi sáng (08:00)...")
+        async with get_db_session() as session:
+            res = await session.execute(select(User))
+            users = res.scalars().all()
+            
+            for user in users:
+                member = None
+                for guild in self.bot.guilds:
+                    member = guild.get_member(user.user_id)
+                    if member:
+                        break
+                if member:
+                    try:
+                        embed = discord.Embed(
+                            title="🌅 CHÀO NGÀY MỚI TỐT LÀNH! 🌅",
+                            description=(
+                                f"Chào {member.mention},\n\n"
+                                f"Chúc bạn một ngày mới tràn đầy năng lượng, học tập và làm việc thật hiệu quả! 🚀\n\n"
+                                f"💡 Đừng quên đăng ký mục tiêu tập trung của hôm nay bằng nút **Đăng ký mục tiêu 🎯** tại kênh `control-panel` nhé! "
+                                f"Hãy duy trì tinh thần kỷ luật và tích lũy thật nhiều Token/XP hôm nay nào! 💪"
+                            ),
+                            color=discord.Color.green()
+                        )
+                        embed.set_thumbnail(url=member.display_avatar.url)
+                        embed.set_footer(text="Chronos Bot • Kỷ luật làm nên con người bạn! 🔥")
+                        await member.send(embed=embed)
+                        logger.info(f"Đã gửi tin nhắn chúc ngày mới thành công cho {member.name}.")
+                    except discord.Forbidden:
+                        logger.warning(f"Không thể gửi DM chào buổi sáng cho {member.name} (chặn DM).")
+                    except Exception as e:
+                        logger.error(f"Lỗi gửi DM chào buổi sáng cho {user.user_id}: {e}")
+
+    async def daily_summary_job(self):
+        """
+        Job chạy hằng ngày lúc 00:00 đêm để gửi báo cáo tổng kết năng suất ngày hôm đó của thành viên.
+        """
+        logger.info("Bắt đầu Job gửi báo cáo tổng kết ngày (00:00)...")
+        now = datetime.datetime.now()
+        yesterday = (now - datetime.timedelta(days=1)).date()
+        start_of_yesterday = datetime.datetime.combine(yesterday, datetime.time.min)
+        end_of_yesterday = datetime.datetime.combine(yesterday, datetime.time.max)
+        
+        async with get_db_session() as session:
+            res = await session.execute(select(User))
+            users = res.scalars().all()
+            
+            for user in users:
+                # Truy vấn các phiên Focus hoàn thành của ngày hôm qua
+                stmt = (
+                    select(FocusSession, Task)
+                    .outerjoin(Task, FocusSession.task_id == Task.task_id)
+                    .where(
+                        FocusSession.user_id == user.user_id,
+                        FocusSession.status == "completed",
+                        FocusSession.start_time >= start_of_yesterday,
+                        FocusSession.start_time <= end_of_yesterday
+                    )
+                )
+                fs_res = await session.execute(stmt)
+                completed_sessions = fs_res.all()
+                
+                # Chỉ gửi tin nhắn nếu có hoạt động tập trung trong ngày
+                if completed_sessions:
+                    member = None
+                    for guild in self.bot.guilds:
+                        member = guild.get_member(user.user_id)
+                        if member:
+                            break
+                    if member:
+                        # Tính toán các chỉ số trong ngày
+                        total_focus_minutes = sum(fs.actual_duration for fs, task in completed_sessions)
+                        total_hours = total_focus_minutes // 60
+                        total_mins = total_focus_minutes % 60
+                        
+                        earned_xp = total_focus_minutes * 2
+                        earned_tokens = total_focus_minutes // 25
+                        
+                        # Liệt kê danh sách các mục tiêu đã làm
+                        task_lines = []
+                        for fs, task in completed_sessions:
+                            title = task.title if task else "Tập trung tự do"
+                            task_lines.append(f"• **{title}**: `{fs.actual_duration} phút`")
+                        
+                        tasks_str = "\n".join(task_lines)
+                        yesterday_str = yesterday.strftime("%d/%m/%Y")
+                        
+                        try:
+                            embed = discord.Embed(
+                                title="📊 BÁO CÁO NĂNG SUẤT HẰNG NGÀY 📊",
+                                description=(
+                                    f"Chúc mừng {member.mention} đã hoàn thành một ngày học tập/làm việc kỷ luật!\n"
+                                    f"Dưới đây là tổng kết hoạt động của bạn trong ngày **{yesterday_str}**:\n\n"
+                                    f"🔥 **Mục tiêu hoàn thành:** `{len(completed_sessions)}` mục tiêu\n"
+                                    f"⏱️ **Tổng thời gian tập trung:** `{total_hours} giờ {total_mins} phút`\n"
+                                    f"🎁 **Phần thưởng tích lũy ước tính:** `+{earned_xp} XP` ⭐ | `+{earned_tokens} Tokens` 🪙\n\n"
+                                    f"📋 **Chi tiết các mục tiêu:**\n{tasks_str}"
+                                ),
+                                color=discord.Color.gold()
+                            )
+                            embed.set_thumbnail(url=member.display_avatar.url)
+                            embed.set_footer(text="Chronos Bot • Kiên trì mỗi ngày, kiến tạo tương lai! 🌟")
+                            await member.send(embed=embed)
+                            logger.info(f"Đã gửi báo cáo tổng kết ngày hôm qua cho {member.name}.")
+                        except discord.Forbidden:
+                            logger.warning(f"Không thể gửi DM báo cáo ngày cho {member.name} (chặn DM).")
+                        except Exception as e:
+                            logger.error(f"Lỗi gửi DM báo cáo ngày cho {user.user_id}: {e}")
+
+    @commands.hybrid_command(
+        name="test_morning_greeting", 
+        description="[Admin Only] Kích hoạt thủ công gửi tin nhắn chúc ngày mới tốt lành"
+    )
+    @commands.has_permissions(administrator=True)
+    async def test_morning_greeting(self, ctx: commands.Context):
+        await ctx.defer(ephemeral=True)
+        try:
+            await self.morning_greeting_job()
+            await ctx.send("✅ Đã chạy gửi tin nhắn chúc ngày mới tốt lành đến các thành viên!", ephemeral=True)
+        except Exception as e:
+            logger.error(f"Lỗi khi gửi chúc ngày mới thủ công: {e}")
+            await ctx.send(f"❌ Gặp lỗi: {e}", ephemeral=True)
+
+    @commands.hybrid_command(
+        name="test_daily_summary", 
+        description="[Admin Only] Kích hoạt thủ công gửi báo cáo năng suất hôm nay/hôm qua"
+    )
+    @commands.has_permissions(administrator=True)
+    async def test_daily_summary(self, ctx: commands.Context):
+        await ctx.defer(ephemeral=True)
+        try:
+            await self.daily_summary_job()
+            await ctx.send("✅ Đã chạy gửi báo cáo năng suất ngày đến các thành viên!", ephemeral=True)
+        except Exception as e:
+            logger.error(f"Lỗi khi gửi báo cáo năng suất thủ công: {e}")
+            await ctx.send(f"❌ Gặp lỗi: {e}", ephemeral=True)
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Tracker(bot))
